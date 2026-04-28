@@ -10,24 +10,24 @@ from pulpcore.plugin.models import BaseModel
 from pulpcore.plugin.util import get_domain_pk
 
 
-class TaskPlan(BaseModel):
+class Workflow(BaseModel):
     """
     A named, ordered pipeline of tasks executed sequentially.
 
     Fields:
-        name (models.TextField): Unique name of the plan.
-        state (models.TextField): Current state of the plan, drawn from
+        name (models.TextField): Unique name of the workflow.
+        state (models.TextField): Current state of the workflow, drawn from
             ``pulpcore.constants.TASK_STATES``.
-        start_time (models.DateTimeField): When the plan should start executing.
+        start_time (models.DateTimeField): When the workflow should start executing.
             A pulpcore TaskSchedule is created at this time to dispatch the
-            ``execute_task_plan`` task.
-        started_at (models.DateTimeField): When the first step was dispatched.
-        finished_at (models.DateTimeField): When the plan reached a terminal state.
-        error (models.JSONField): Fatal error info, populated from a failing step.
+            ``execute_workflow`` task.
+        started_at (models.DateTimeField): When the first task was dispatched.
+        finished_at (models.DateTimeField): When the workflow reached a terminal state.
+        error (models.JSONField): Fatal error info, populated from a failing task.
 
     Relations:
-        pulp_domain (models.ForeignKey): Domain the plan belongs to.
-        current_step (models.ForeignKey): The step currently in progress (if any).
+        pulp_domain (models.ForeignKey): Domain the workflow belongs to.
+        current_task (models.ForeignKey): The task currently in progress (if any).
     """
 
     name = models.TextField(unique=True)
@@ -38,39 +38,39 @@ class TaskPlan(BaseModel):
     error = models.JSONField(null=True)
 
     pulp_domain = models.ForeignKey("core.Domain", default=get_domain_pk, on_delete=models.CASCADE)
-    current_step = models.ForeignKey(
-        "TaskPlanStep",
+    current_task = models.ForeignKey(
+        "WorkflowTask",
         null=True,
         related_name="+",
         on_delete=models.SET_NULL,
     )
 
     def __str__(self):
-        return "TaskPlan: {name} [{state}]".format(name=self.name, state=self.state)
+        return "Workflow: {name} [{state}]".format(name=self.name, state=self.state)
 
     class Meta:
         permissions = [
-            ("manage_roles_taskplan", "Can manage role assignments on task plans"),
+            ("manage_roles_workflow", "Can manage role assignments on workflows"),
         ]
 
 
-class TaskPlanStep(BaseModel):
+class WorkflowTask(BaseModel):
     """
-    A single step within a TaskPlan.
+    A single task within a Workflow.
 
     Fields:
-        index (models.PositiveIntegerField): Execution order within the plan.
+        index (models.PositiveIntegerField): Execution order within the workflow.
         task_name (models.TextField): Dotted Python path of the task to dispatch.
         task_args (EncryptedJSONField): Positional args for the task.
         task_kwargs (EncryptedJSONField): Keyword args for the task.
         reserved_resources (ArrayField): Resources to reserve when dispatching.
 
     Relations:
-        plan (models.ForeignKey): The TaskPlan this step belongs to.
-        dispatched_task (models.ForeignKey): The Task created when this step ran.
+        workflow (models.ForeignKey): The Workflow this task belongs to.
+        dispatched_task (models.ForeignKey): The Task created when this task ran.
     """
 
-    plan = models.ForeignKey(TaskPlan, related_name="steps", on_delete=models.CASCADE)
+    workflow = models.ForeignKey(Workflow, related_name="tasks", on_delete=models.CASCADE)
     index = models.PositiveIntegerField()
     task_name = models.TextField()
     task_args = EncryptedJSONField(default=list)
@@ -84,10 +84,10 @@ class TaskPlanStep(BaseModel):
     )
 
     def __str__(self):
-        return "TaskPlanStep: {plan}[{index}] {task_name}".format(
-            plan=self.plan.name, index=self.index, task_name=self.task_name
+        return "WorkflowTask: {workflow}[{index}] {task_name}".format(
+            workflow=self.workflow.name, index=self.index, task_name=self.task_name
         )
 
     class Meta:
-        unique_together = ("plan", "index")
+        unique_together = ("workflow", "index")
         ordering = ("index",)

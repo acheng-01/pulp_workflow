@@ -20,7 +20,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name='TaskPlan',
+            name='Workflow',
             fields=[
                 ('pulp_id', models.UUIDField(default=pulpcore.app.models.base.pulp_uuid, editable=False, primary_key=True, serialize=False)),
                 ('pulp_created', models.DateTimeField(auto_now_add=True)),
@@ -33,12 +33,12 @@ class Migration(migrations.Migration):
                 ('error', models.JSONField(null=True)),
             ],
             options={
-                'permissions': [('manage_roles_taskplan', 'Can manage role assignments on task plans')],
+                'permissions': [('manage_roles_workflow', 'Can manage role assignments on workflows')],
             },
             bases=(django_lifecycle.mixins.LifecycleModelMixin, models.Model),
         ),
         migrations.CreateModel(
-            name='TaskPlanStep',
+            name='WorkflowTask',
             fields=[
                 ('pulp_id', models.UUIDField(default=pulpcore.app.models.base.pulp_uuid, editable=False, primary_key=True, serialize=False)),
                 ('pulp_created', models.DateTimeField(auto_now_add=True)),
@@ -49,21 +49,21 @@ class Migration(migrations.Migration):
                 ('task_kwargs', pulpcore.app.models.fields.EncryptedJSONField(default=dict)),
                 ('reserved_resources', django.contrib.postgres.fields.ArrayField(base_field=models.TextField(), null=True, size=None)),
                 ('dispatched_task', models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to='core.task')),
-                ('plan', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='steps', to='workflow.taskplan')),
+                ('workflow', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='tasks', to='workflow.workflow')),
             ],
             options={
                 'ordering': ('index',),
-                'unique_together': {('plan', 'index')},
+                'unique_together': {('workflow', 'index')},
             },
             bases=(django_lifecycle.mixins.LifecycleModelMixin, models.Model),
         ),
         migrations.AddField(
-            model_name='taskplan',
-            name='current_step',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to='workflow.taskplanstep'),
+            model_name='workflow',
+            name='current_task',
+            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to='workflow.workflowtask'),
         ),
         migrations.AddField(
-            model_name='taskplan',
+            model_name='workflow',
             name='pulp_domain',
             field=models.ForeignKey(default=pulpcore.app.util.get_domain_pk, on_delete=django.db.models.deletion.CASCADE, to='core.domain'),
         ),

@@ -7,15 +7,15 @@ from django.utils import timezone
 from pulpcore.constants import TASK_FINAL_STATES, TASK_STATES
 from pulpcore.plugin.tasking import dispatch
 
-from pulp_workflow.app.models import TaskPlan
+from pulp_workflow.app.models import Workflow
 
 _log = logging.getLogger(__name__)
 
 # How often to re-check a child task's state while waiting.
 _CHILD_POLL_INTERVAL_SECONDS = 1.0
 
-# Marker key used in a step's ``task_args`` / ``task_kwargs`` to reference a
-# resource created by the previous step. The marker's value is a Django
+# Marker key used in a task's ``task_args`` / ``task_kwargs`` to reference a
+# resource created by the previous task. The marker's value is a Django
 # ``app_label.model`` string (e.g. ``"core.repositoryversion"``).
 PREV_RESOURCE_MARKER = "$prev_resource"
 
@@ -24,7 +24,7 @@ def _resolve_prev_resource(model_key, prev_task):
     """Return the pk of the unique CreatedResource of type ``model_key``."""
     if prev_task is None:
         raise ValueError(
-            f"{PREV_RESOURCE_MARKER!r} marker used in step 0; no previous step exists."
+            f"{PREV_RESOURCE_MARKER!r} marker used in task 0; no previous task exists."
         )
     try:
         app_label, model = model_key.split(".")
@@ -39,7 +39,7 @@ def _resolve_prev_resource(model_key, prev_task):
     ]
     if len(matches) != 1:
         raise ValueError(
-            f"Expected exactly one {model_key!r} created resource on previous step "
+            f"Expected exactly one {model_key!r} created resource on previous task "
             f"(task {prev_task.pk}), found {len(matches)}."
         )
     return str(matches[0].object_id)
@@ -67,65 +67,65 @@ def _resolve_value(value, prev_task):
     return value
 
 
-def execute_task_plan(task_plan_pk):
+def execute_workflow(workflow_pk):
     """
-    Execute the steps of a TaskPlan in order, dispatching each step as a child task.
+    Execute the tasks of a Workflow in order, dispatching each as a child task.
 
     This task is dispatched by a pulpcore ``TaskSchedule`` that is created when a
-    ``TaskPlan`` is submitted via the API. For each step we call
+    ``Workflow`` is submitted via the API. For each task we call
     ``pulpcore.plugin.tasking.dispatch`` to create a real pulpcore Task (which gets
-    ``parent_task`` set to the running ``execute_task_plan`` task automatically),
-    record it on the step via ``dispatched_task``, and wait for it to reach a final
-    state before moving on. If a child task ends in any non-COMPLETED final state
-    the plan transitions to FAILED and remaining steps are not dispatched.
+    ``parent_task`` set to the running ``execute_workflow`` task automatically),
+    record it on the WorkflowTask via ``dispatched_task``, and wait for it to reach
+    a final state before moving on. If a child task ends in any non-COMPLETED final
+    state the workflow transitions to FAILED and remaining tasks are not dispatched.
 
     Args:
-        task_plan_pk (str): The primary key of the TaskPlan to execute.
+        workflow_pk (str): The primary key of the Workflow to execute.
     """
-    plan = TaskPlan.objects.get(pk=task_plan_pk)
+    workflow = Workflow.objects.get(pk=workflow_pk)
 
-    plan.state = TASK_STATES.RUNNING
-    plan.started_at = timezone.now()
-    plan.save(update_fields=["state", "started_at", "pulp_last_updated"])
+    workflow.state = TASK_STATES.RUNNING
+    workflow.started_at = timezone.now()
+    workflow.save(update_fields=["state", "started_at", "pulp_last_updated"])
 
     prev_task = None
-    for step in plan.steps.all():
-        plan.current_step = step
-        plan.save(update_fields=["current_step", "pulp_last_updated"])
+    for wf_task in workflow.tasks.all():
+        workflow.current_task = wf_task
+        workflow.save(update_fields=["current_task", "pulp_last_updated"])
 
         try:
-            resolved_args = _resolve_value(step.task_args, prev_task)
-            resolved_kwargs = _resolve_value(step.task_kwargs, prev_task)
+            resolved_args = _resolve_value(wf_task.task_args, prev_task)
+            resolved_kwargs = _resolve_value(wf_task.task_kwargs, prev_task)
             child = dispatch(
-                step.task_name,
+                wf_task.task_name,
                 args=resolved_args,
                 kwargs=resolved_kwargs,
-                exclusive_resources=step.reserved_resources or None,
+                exclusive_resources=wf_task.reserved_resources or None,
             )
         except Exception as exc:
-            _log.exception("TaskPlan %s failed dispatching step %s", plan.name, step.index)
-            _fail_plan(plan, step, exc=exc)
+            _log.exception("Workflow %s failed dispatching task %s", workflow.name, wf_task.index)
+            _fail_workflow(workflow, wf_task, exc=exc)
             return
 
-        step.dispatched_task = child
-        step.save(update_fields=["dispatched_task", "pulp_last_updated"])
+        wf_task.dispatched_task = child
+        wf_task.save(update_fields=["dispatched_task", "pulp_last_updated"])
 
         final_state = _wait_for_task(child)
         if final_state != TASK_STATES.COMPLETED:
             child.refresh_from_db()
-            _fail_plan(
-                plan,
-                step,
-                description=f"Step task ended in state {final_state!r}.",
+            _fail_workflow(
+                workflow,
+                wf_task,
+                description=f"Task ended in state {final_state!r}.",
                 child_error=child.error,
             )
             return
         prev_task = child
 
-    plan.current_step = None
-    plan.state = TASK_STATES.COMPLETED
-    plan.finished_at = timezone.now()
-    plan.save(update_fields=["state", "finished_at", "current_step", "pulp_last_updated"])
+    workflow.current_task = None
+    workflow.state = TASK_STATES.COMPLETED
+    workflow.finished_at = timezone.now()
+    workflow.save(update_fields=["state", "finished_at", "current_task", "pulp_last_updated"])
 
 
 def _wait_for_task(task):
@@ -137,17 +137,17 @@ def _wait_for_task(task):
         time.sleep(_CHILD_POLL_INTERVAL_SECONDS)
 
 
-def _fail_plan(plan, step, exc=None, description=None, child_error=None):
-    """Record a step failure on the plan and transition it to FAILED."""
-    plan.state = TASK_STATES.FAILED
-    plan.finished_at = timezone.now()
-    plan.error = {
-        "step_index": step.index,
-        "task_name": step.task_name,
-        "description": description or (str(exc) if exc else "Step failed."),
+def _fail_workflow(workflow, wf_task, exc=None, description=None, child_error=None):
+    """Record a task failure on the workflow and transition it to FAILED."""
+    workflow.state = TASK_STATES.FAILED
+    workflow.finished_at = timezone.now()
+    workflow.error = {
+        "task_index": wf_task.index,
+        "task_name": wf_task.task_name,
+        "description": description or (str(exc) if exc else "Task failed."),
     }
     if exc is not None:
-        plan.error["traceback"] = traceback.format_exc()
+        workflow.error["traceback"] = traceback.format_exc()
     if child_error is not None:
-        plan.error["child_error"] = child_error
-    plan.save(update_fields=["state", "finished_at", "error", "pulp_last_updated"])
+        workflow.error["child_error"] = child_error
+    workflow.save(update_fields=["state", "finished_at", "error", "pulp_last_updated"])

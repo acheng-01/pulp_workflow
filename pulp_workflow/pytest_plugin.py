@@ -10,7 +10,7 @@ def workflow_bindings(_api_client_set, bindings_cfg):
     """
     A namespace providing preconfigured pulp_workflow api clients.
 
-    e.g. `workflow_bindings.WorkflowTaskSchedulesApi.list()`.
+    e.g. `workflow_bindings.WorkflowsApi.list()`.
     """
     from pulpcore.client import pulp_workflow as workflow_bindings_module
 
@@ -21,13 +21,13 @@ def workflow_bindings(_api_client_set, bindings_cfg):
 
 
 @pytest.fixture
-def task_plan_factory(workflow_bindings, add_to_cleanup):
-    """A factory to generate a TaskPlan with auto-cleanup."""
+def workflow_factory(workflow_bindings, add_to_cleanup):
+    """A factory to generate a Workflow with auto-cleanup."""
 
-    def _create_task_plan(**kwargs):
+    def _create_workflow(**kwargs):
         kwargs.setdefault("name", str(uuid.uuid4()))
         kwargs.setdefault(
-            "steps",
+            "tasks",
             [
                 {
                     "index": 0,
@@ -35,8 +35,8 @@ def task_plan_factory(workflow_bindings, add_to_cleanup):
                 },
             ],
         )
-        plan = workflow_bindings.WorkflowTaskPlansApi.create(kwargs)
-        add_to_cleanup(workflow_bindings.WorkflowTaskPlansApi, plan.pulp_href)
-        return plan
+        workflow = workflow_bindings.WorkflowsApi.create(kwargs)
+        add_to_cleanup(workflow_bindings.WorkflowsApi, workflow.pulp_href)
+        return workflow
 
-    return _create_task_plan
+    return _create_workflow

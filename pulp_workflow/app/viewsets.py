@@ -2,11 +2,11 @@ from rest_framework import mixins
 
 from pulpcore.plugin.viewsets import NamedModelViewSet, RolesMixin
 
-from pulp_workflow.app.models import TaskPlan
-from pulp_workflow.app.serializers import TaskPlanSerializer
+from pulp_workflow.app.models import Workflow
+from pulp_workflow.app.serializers import WorkflowSerializer
 
 
-class TaskPlanViewSet(
+class WorkflowViewSet(
     NamedModelViewSet,
     mixins.CreateModelMixin,
     mixins.RetrieveModelMixin,
@@ -15,26 +15,21 @@ class TaskPlanViewSet(
     RolesMixin,
 ):
     """
-    A ViewSet for managing TaskPlans.
+    A ViewSet for managing Workflows.
 
-    Plans are created with their full set of steps and are immutable thereafter; to
-    change a plan, delete it and create a new one.
+    Workflows are created with their full set of tasks and are immutable thereafter; to
+    change a workflow, delete it and create a new one.
     """
 
-    queryset = TaskPlan.objects.all().prefetch_related("steps")
-    endpoint_name = "task-plans"
-
-    @classmethod
-    def endpoint_pieces(cls):
-        return ["workflow", "task-plans"]
-
-    serializer_class = TaskPlanSerializer
+    queryset = Workflow.objects.all().prefetch_related("tasks")
+    endpoint_name = "workflows"
+    serializer_class = WorkflowSerializer
     ordering = "-pulp_created"
     filterset_fields = {
         "name": ["exact", "contains"],
         "state": ["exact", "in"],
     }
-    queryset_filtering_required_permission = "workflow.view_taskplan"
+    queryset_filtering_required_permission = "workflow.view_workflow"
 
     DEFAULT_ACCESS_POLICY = {
         "statements": [
@@ -42,7 +37,7 @@ class TaskPlanViewSet(
                 "action": ["list", "retrieve", "my_permissions"],
                 "principal": "authenticated",
                 "effect": "allow",
-                "condition": "has_model_or_domain_or_obj_perms:workflow.view_taskplan",
+                "condition": "has_model_or_domain_or_obj_perms:workflow.view_workflow",
             },
             {
                 "action": [
@@ -54,17 +49,17 @@ class TaskPlanViewSet(
                 ],
                 "principal": "authenticated",
                 "effect": "allow",
-                "condition": "has_model_or_domain_or_obj_perms:workflow.change_taskplan",
+                "condition": "has_model_or_domain_or_obj_perms:workflow.change_workflow",
             },
         ],
         "queryset_scoping": {"function": "scope_queryset"},
     }
     LOCKED_ROLES = {
-        "workflow.taskplan_admin": [
-            "workflow.view_taskplan",
-            "workflow.change_taskplan",
-            "workflow.delete_taskplan",
-            "workflow.manage_roles_taskplan",
+        "workflow.workflow_admin": [
+            "workflow.view_workflow",
+            "workflow.change_workflow",
+            "workflow.delete_workflow",
+            "workflow.manage_roles_workflow",
         ],
-        "workflow.taskplan_viewer": ["workflow.view_taskplan"],
+        "workflow.workflow_viewer": ["workflow.view_workflow"],
     }
