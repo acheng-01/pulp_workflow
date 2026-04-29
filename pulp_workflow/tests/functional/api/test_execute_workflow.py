@@ -32,7 +32,6 @@ def _wait_for_workflow(api, workflow_href, timeout=WORKFLOW_TIMEOUT_SECONDS):
     raise AssertionError(f"Workflow {workflow_href} did not finish within {timeout}s")
 
 
-@pytest.mark.parallel
 def test_execute_workflow_add_content_and_publish(
     workflow_bindings,
     pulpcore_bindings,
