@@ -15,6 +15,7 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
+        ('contenttypes', '0002_remove_content_type_name'),
         ('core', '0150_taskschedule_task_kwargs'),
     ]
 
@@ -46,8 +47,6 @@ class Migration(migrations.Migration):
                 ('pulp_last_updated', models.DateTimeField(auto_now=True, null=True)),
                 ('index', models.PositiveIntegerField()),
                 ('task_name', models.TextField()),
-                ('task_args', pulpcore.app.models.fields.EncryptedJSONField(default=list)),
-                ('task_kwargs', pulpcore.app.models.fields.EncryptedJSONField(default=dict)),
                 ('reserved_resources', django.contrib.postgres.fields.ArrayField(base_field=models.TextField(), null=True, size=None)),
                 ('dispatched_task', models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to='core.task')),
                 ('workflow', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='tasks', to='workflow.workflow')),
@@ -57,6 +56,63 @@ class Migration(migrations.Migration):
                 'unique_together': {('workflow', 'index')},
             },
             bases=(django_lifecycle.mixins.LifecycleModelMixin, models.Model),
+        ),
+        migrations.CreateModel(
+            name='WorkflowTaskArg',
+            fields=[
+                ('pulp_id', models.UUIDField(default=pulpcore.app.models.base.pulp_uuid, editable=False, primary_key=True, serialize=False)),
+                ('pulp_created', models.DateTimeField(auto_now_add=True)),
+                ('pulp_last_updated', models.DateTimeField(auto_now=True, null=True)),
+                ('dynamic', models.BooleanField(default=False)),
+                ('value', pulpcore.app.models.fields.EncryptedJSONField(null=True)),
+                ('arg_index', models.PositiveIntegerField()),
+                ('content_type', models.ForeignKey(null=True, on_delete=django.db.models.deletion.PROTECT, to='contenttypes.contenttype')),
+                ('workflow_task', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='task_args', to='workflow.workflowtask')),
+            ],
+            options={
+                'ordering': ('arg_index',),
+                'unique_together': {('workflow_task', 'arg_index')},
+            },
+            bases=(django_lifecycle.mixins.LifecycleModelMixin, models.Model),
+        ),
+        migrations.CreateModel(
+            name='WorkflowTaskKwarg',
+            fields=[
+                ('pulp_id', models.UUIDField(default=pulpcore.app.models.base.pulp_uuid, editable=False, primary_key=True, serialize=False)),
+                ('pulp_created', models.DateTimeField(auto_now_add=True)),
+                ('pulp_last_updated', models.DateTimeField(auto_now=True, null=True)),
+                ('dynamic', models.BooleanField(default=False)),
+                ('value', pulpcore.app.models.fields.EncryptedJSONField(null=True)),
+                ('kwarg_key', models.TextField()),
+                ('content_type', models.ForeignKey(null=True, on_delete=django.db.models.deletion.PROTECT, to='contenttypes.contenttype')),
+                ('workflow_task', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='task_kwargs', to='workflow.workflowtask')),
+            ],
+            options={
+                'unique_together': {('workflow_task', 'kwarg_key')},
+            },
+            bases=(django_lifecycle.mixins.LifecycleModelMixin, models.Model),
+        ),
+        migrations.AddConstraint(
+            model_name='workflowtaskarg',
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(('content_type__isnull', False), ('dynamic', True)),
+                    models.Q(('content_type__isnull', True), ('dynamic', False)),
+                    _connector='OR',
+                ),
+                name='workflowtaskarg_dynamic_iff_ctype',
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name='workflowtaskkwarg',
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(('content_type__isnull', False), ('dynamic', True)),
+                    models.Q(('content_type__isnull', True), ('dynamic', False)),
+                    _connector='OR',
+                ),
+                name='workflowtaskkwarg_dynamic_iff_ctype',
+            ),
         ),
         migrations.AddField(
             model_name='workflow',

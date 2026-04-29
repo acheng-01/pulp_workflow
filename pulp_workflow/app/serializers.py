@@ -1,5 +1,6 @@
 from gettext import gettext as _
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
@@ -7,43 +8,99 @@ from rest_framework.validators import UniqueValidator
 from pulpcore.plugin.models import TaskSchedule
 from pulpcore.plugin.serializers import IdentityField, ModelSerializer, RelatedField
 
-from pulp_workflow.app.models import Workflow, WorkflowTask
-from pulp_workflow.app.tasks import PREV_RESOURCE_MARKER
+from pulp_workflow.app.models import (
+    Workflow,
+    WorkflowTask,
+    WorkflowTaskArg,
+    WorkflowTaskKwarg,
+)
 
 
-def _validate_markers(value, task_index, field):
-    """Recursively check ``$prev_resource`` markers nested in ``value``.
+class ContentTypeNaturalKeyField(serializers.CharField):
+    """A ``ContentType`` field serialized as ``"app_label.model"``."""
 
-    Markers must be a one-key dict whose value is an ``app_label.model`` string,
-    and they cannot appear in task 0 (no previous task exists).
-    """
-    if isinstance(value, dict) and PREV_RESOURCE_MARKER in value:
-        if task_index == 0:
+    def to_internal_value(self, data):
+        value = super().to_internal_value(data)
+        if value.count(".") != 1:
             raise serializers.ValidationError(
-                _("Task 0 cannot use {marker!r} (no previous task).").format(
-                    marker=PREV_RESOURCE_MARKER
-                )
+                _("Must be 'app_label.model', got {v!r}.").format(v=value)
             )
-        if len(value) != 1:
+        try:
+            return ContentType.objects.get_by_natural_key(*value.split("."))
+        except ContentType.DoesNotExist:
+            raise serializers.ValidationError(_("Unknown content type {v!r}.").format(v=value))
+
+    def to_representation(self, value):
+        return f"{value.app_label}.{value.model}"
+
+
+def _validate_dynamic_consistency(attrs):
+    if attrs.get("dynamic", False):
+        if attrs.get("content_type") is None:
             raise serializers.ValidationError(
-                _(
-                    "Task {idx} {field}: a {marker!r} marker must be the only key in its dict."
-                ).format(idx=task_index, field=field, marker=PREV_RESOURCE_MARKER)
+                _("'content_type' is required when 'dynamic' is true.")
             )
-        model_key = value[PREV_RESOURCE_MARKER]
-        if not isinstance(model_key, str) or model_key.count(".") != 1:
-            raise serializers.ValidationError(
-                _(
-                    "Task {idx} {field}: {marker!r} value must be 'app_label.model', got {v!r}."
-                ).format(idx=task_index, field=field, marker=PREV_RESOURCE_MARKER, v=model_key)
-            )
-        return
-    if isinstance(value, list):
-        for item in value:
-            _validate_markers(item, task_index, field)
-    elif isinstance(value, dict):
-        for item in value.values():
-            _validate_markers(item, task_index, field)
+    elif attrs.get("content_type") is not None:
+        raise serializers.ValidationError(
+            _("'content_type' is only allowed when 'dynamic' is true.")
+        )
+    return attrs
+
+
+class WorkflowTaskArgSerializer(serializers.ModelSerializer):
+    """A single positional arg of a ``WorkflowTask``."""
+
+    arg_index = serializers.IntegerField(min_value=0)
+    dynamic = serializers.BooleanField(required=False, default=False)
+    value = serializers.JSONField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Literal value passed to the task. Write-only; values may be sensitive."),
+    )
+    content_type = ContentTypeNaturalKeyField(
+        required=False,
+        allow_null=True,
+        help_text=_(
+            "When ``dynamic`` is true, the 'app_label.model' of the previous task's created "
+            "resource to resolve to a primary key at dispatch time."
+        ),
+    )
+
+    class Meta:
+        model = WorkflowTaskArg
+        fields = ("arg_index", "dynamic", "value", "content_type")
+
+    def validate(self, attrs):
+        return _validate_dynamic_consistency(super().validate(attrs))
+
+
+class WorkflowTaskKwargSerializer(serializers.ModelSerializer):
+    """A single keyword arg of a ``WorkflowTask``."""
+
+    kwarg_key = serializers.CharField()
+    dynamic = serializers.BooleanField(required=False, default=False)
+    value = serializers.JSONField(
+        required=False,
+        allow_null=True,
+        write_only=True,
+        help_text=_("Literal value passed to the task. Write-only; values may be sensitive."),
+    )
+    content_type = ContentTypeNaturalKeyField(
+        required=False,
+        allow_null=True,
+        help_text=_(
+            "When ``dynamic`` is true, the 'app_label.model' of the previous task's created "
+            "resource to resolve to a primary key at dispatch time."
+        ),
+    )
+
+    class Meta:
+        model = WorkflowTaskKwarg
+        fields = ("kwarg_key", "dynamic", "value", "content_type")
+
+    def validate(self, attrs):
+        return _validate_dynamic_consistency(super().validate(attrs))
 
 
 class WorkflowTaskSerializer(serializers.ModelSerializer):
@@ -61,21 +118,15 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     task_name = serializers.CharField(
         help_text=_("The name of the task to be dispatched."),
     )
-    task_args = serializers.JSONField(
-        help_text=_(
-            "Positional arguments passed to the task. Write-only; not exposed in responses "
-            "because the values may be sensitive."
-        ),
+    task_args = WorkflowTaskArgSerializer(
+        many=True,
         required=False,
-        write_only=True,
+        help_text=_("Positional arguments passed to the task."),
     )
-    task_kwargs = serializers.JSONField(
-        help_text=_(
-            "Keyword arguments passed to the task. Write-only; not exposed in responses "
-            "because the values may be sensitive."
-        ),
+    task_kwargs = WorkflowTaskKwargSerializer(
+        many=True,
         required=False,
-        write_only=True,
+        help_text=_("Keyword arguments passed to the task."),
     )
     reserved_resources = serializers.ListField(
         child=serializers.CharField(),
@@ -99,6 +150,22 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             "reserved_resources",
             "dispatched_task",
         )
+
+    def validate_task_args(self, value):
+        indexes = [a["arg_index"] for a in value]
+        if len(set(indexes)) != len(indexes):
+            raise serializers.ValidationError(_("arg_index values must be unique."))
+        if indexes and sorted(indexes) != list(range(len(indexes))):
+            raise serializers.ValidationError(
+                _("arg_index values must be contiguous starting from 0.")
+            )
+        return value
+
+    def validate_task_kwargs(self, value):
+        keys = [kw["kwarg_key"] for kw in value]
+        if len(set(keys)) != len(keys):
+            raise serializers.ValidationError(_("kwarg_key values must be unique."))
+        return value
 
 
 class WorkflowSerializer(ModelSerializer):
@@ -169,9 +236,14 @@ class WorkflowSerializer(ModelSerializer):
         indexes = [task["index"] for task in value]
         if len(set(indexes)) != len(indexes):
             raise serializers.ValidationError(_("Task indexes must be unique within a workflow."))
+        # Dynamic args reference the previous task's created resources, so task 0 cannot use them.
         for task in value:
-            for field in ("task_args", "task_kwargs"):
-                _validate_markers(task.get(field), task["index"], field)
+            if task["index"] == 0:
+                rows = task.get("task_args", []) + task.get("task_kwargs", [])
+                if any(row.get("dynamic") for row in rows):
+                    raise serializers.ValidationError(
+                        _("Task 0 cannot have dynamic args (no previous task).")
+                    )
         return value
 
     @transaction.atomic
@@ -179,9 +251,17 @@ class WorkflowSerializer(ModelSerializer):
         tasks_data = validated_data.pop("tasks")
         workflow = Workflow.objects.create(**validated_data)
         for task_data in tasks_data:
-            WorkflowTask.objects.create(workflow=workflow, **task_data)
+            task_args = task_data.pop("task_args", [])
+            task_kwargs = task_data.pop("task_kwargs", [])
+            wf_task = WorkflowTask.objects.create(workflow=workflow, **task_data)
+            WorkflowTaskArg.objects.bulk_create(
+                WorkflowTaskArg(workflow_task=wf_task, **row) for row in task_args
+            )
+            WorkflowTaskKwarg.objects.bulk_create(
+                WorkflowTaskKwarg(workflow_task=wf_task, **row) for row in task_kwargs
+            )
 
-        # Schedule a one-shot dispatch of execute_workflow at the workflow's start_time.
+        # Schedule a one-shot dispatch of execute_workflow at start_time.
         # dispatch_interval=None makes pulpcore's scheduler fire it once and stop.
         TaskSchedule.objects.create(
             name=f"pulp_workflow.workflow:{workflow.pk}",

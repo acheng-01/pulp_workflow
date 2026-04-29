@@ -2,15 +2,13 @@
 
 The workflow has two tasks:
     0. Add ``content_a`` to a file repository (creates repository version 1).
-    1. Publish that repository version. The ``repository_version_pk`` is supplied
-       at runtime via a ``$prev_resource`` marker that resolves to the unique
+    1. Publish that repository version. The ``repository_version_pk`` kwarg is
+       a dynamic arg that resolves at dispatch time to the unique
        ``RepositoryVersion`` created by task 0.
 """
 
 import time
 import uuid
-
-import pytest
 
 WORKFLOW_TIMEOUT_SECONDS = 300
 POLL_INTERVAL_SECONDS = 2.0
@@ -49,22 +47,32 @@ def test_execute_workflow_add_content_and_publish(
             {
                 "index": 0,
                 "task_name": "pulpcore.app.tasks.repository.add_and_remove",
-                "task_kwargs": {
-                    "repository_pk": _pk_from_href(repo.pulp_href),
-                    "add_content_units": [_pk_from_href(content_a.pulp_href)],
-                    "remove_content_units": [],
-                },
+                "task_kwargs": [
+                    {
+                        "kwarg_key": "repository_pk",
+                        "value": _pk_from_href(repo.pulp_href),
+                    },
+                    {
+                        "kwarg_key": "add_content_units",
+                        "value": [_pk_from_href(content_a.pulp_href)],
+                    },
+                    {"kwarg_key": "remove_content_units", "value": []},
+                ],
                 "reserved_resources": [repo.pulp_href],
             },
             {
                 "index": 1,
                 "task_name": "pulp_file.app.tasks.publish",
-                "task_kwargs": {
-                    "manifest": "PULP_MANIFEST",
+                "task_kwargs": [
+                    {"kwarg_key": "manifest", "value": "PULP_MANIFEST"},
                     # Resolved at dispatch time to the pk of the RepositoryVersion
                     # created by task 0.
-                    "repository_version_pk": {"$prev_resource": "core.repositoryversion"},
-                },
+                    {
+                        "dynamic": True,
+                        "kwarg_key": "repository_version_pk",
+                        "content_type": "core.repositoryversion",
+                    },
+                ],
                 "reserved_resources": [repo.pulp_href],
             },
         ],

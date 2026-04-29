@@ -13,7 +13,7 @@ def test_create_workflow(workflow_bindings, workflow_factory):
             {
                 "index": 0,
                 "task_name": "pulpcore.app.tasks.orphan_cleanup",
-                "task_kwargs": {"orphan_protection_time": 0},
+                "task_kwargs": [{"kwarg_key": "orphan_protection_time", "value": 0}],
             },
             {
                 "index": 1,
@@ -31,9 +31,6 @@ def test_create_workflow(workflow_bindings, workflow_factory):
     assert len(workflow.tasks) == 2
     assert workflow.tasks[0].index == 0
     assert workflow.tasks[0].task_name == "pulpcore.app.tasks.orphan_cleanup"
-    # task_args/task_kwargs are write-only and must not be exposed in responses.
-    assert not hasattr(workflow.tasks[0], "task_kwargs") or workflow.tasks[0].task_kwargs is None
-    assert not hasattr(workflow.tasks[0], "task_args") or workflow.tasks[0].task_args is None
     assert workflow.tasks[0].dispatched_task is None
     assert workflow.tasks[1].index == 1
 
@@ -164,18 +161,20 @@ def test_workflow_update_not_supported(workflow_bindings):
 
 @pytest.mark.parallel
 def test_task_args_and_kwargs_not_exposed(workflow_bindings, workflow_factory):
-    """task_args / task_kwargs are write-only and never returned in responses."""
+    """Arg ``value`` fields are write-only and never returned in responses."""
     workflow = workflow_factory(
         tasks=[
             {
                 "index": 0,
                 "task_name": "pulpcore.app.tasks.orphan_cleanup",
-                "task_args": ["secret-positional"],
-                "task_kwargs": {"secret_keyword": "s3cr3t"},
+                "task_args": [{"arg_index": 0, "value": "secret-positional"}],
+                "task_kwargs": [{"kwarg_key": "secret_keyword", "value": "s3cr3t"}],
             },
         ],
     )
     fetched = workflow_bindings.WorkflowsApi.read(workflow.pulp_href)
     raw = fetched.to_dict()["tasks"][0]
-    assert "task_args" not in raw
-    assert "task_kwargs" not in raw
+    for arg in raw.get("task_args") or []:
+        assert "value" not in arg
+    for kw in raw.get("task_kwargs") or []:
+        assert "value" not in kw

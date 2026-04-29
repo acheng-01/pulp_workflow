@@ -1,5 +1,6 @@
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
+from django.db.models import CheckConstraint, Q
 from django.utils import timezone
 
 # EncryptedJSONField is not yet re-exported through pulpcore.plugin; mirror
@@ -56,26 +57,15 @@ class Workflow(BaseModel):
 
 
 class WorkflowTask(BaseModel):
-    """
-    A single task within a Workflow.
+    """A single task within a Workflow.
 
-    Fields:
-        index (models.PositiveIntegerField): Execution order within the workflow.
-        task_name (models.TextField): Dotted Python path of the task to dispatch.
-        task_args (EncryptedJSONField): Positional args for the task.
-        task_kwargs (EncryptedJSONField): Keyword args for the task.
-        reserved_resources (ArrayField): Resources to reserve when dispatching.
-
-    Relations:
-        workflow (models.ForeignKey): The Workflow this task belongs to.
-        dispatched_task (models.ForeignKey): The Task created when this task ran.
+    Positional and keyword args are stored in the related ``task_args`` and
+    ``task_kwargs`` tables (see ``_WorkflowTaskArgBase``).
     """
 
     workflow = models.ForeignKey(Workflow, related_name="tasks", on_delete=models.CASCADE)
     index = models.PositiveIntegerField()
     task_name = models.TextField()
-    task_args = EncryptedJSONField(default=list)
-    task_kwargs = EncryptedJSONField(default=dict)
     reserved_resources = ArrayField(models.TextField(), null=True)
     dispatched_task = models.ForeignKey(
         "core.Task",
@@ -85,10 +75,93 @@ class WorkflowTask(BaseModel):
     )
 
     def __str__(self):
-        return "WorkflowTask: {workflow}[{index}] {task_name}".format(
-            workflow=self.workflow.name, index=self.index, task_name=self.task_name
-        )
+        return f"WorkflowTask: {self.workflow.name}[{self.index}] {self.task_name}"
+
+    def materialize(self, prev_task):
+        """Return ``(args, kwargs)`` for dispatching this task.
+
+        Dynamic rows are resolved against ``prev_task``'s ``created_resources``
+        by ``content_type``. Positional ``arg_index`` values must be contiguous
+        from 0 (enforced at write time by the serializer).
+        """
+        positional = self.task_args.select_related("content_type")
+        keyword = self.task_kwargs.select_related("content_type")
+        args = [a.resolve(prev_task) for a in sorted(positional, key=lambda a: a.arg_index)]
+        kwargs = {kw.kwarg_key: kw.resolve(prev_task) for kw in keyword}
+        return args, kwargs
 
     class Meta:
         unique_together = ("workflow", "index")
         ordering = ("index",)
+
+
+class _WorkflowTaskArgBase(BaseModel):
+    """Abstract base for a positional or keyword arg of a ``WorkflowTask``.
+
+    A row is either *static* (``dynamic=False``; pass ``value`` through) or
+    *dynamic* (``dynamic=True``; resolve to the pk of the previous task's
+    unique created resource of type ``content_type``).
+    """
+
+    dynamic = models.BooleanField(default=False)
+    value = EncryptedJSONField(null=True)
+    content_type = models.ForeignKey(
+        "contenttypes.ContentType",
+        null=True,
+        on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        abstract = True
+        constraints = [
+            CheckConstraint(
+                condition=(
+                    Q(dynamic=True, content_type__isnull=False)
+                    | Q(dynamic=False, content_type__isnull=True)
+                ),
+                name="%(class)s_dynamic_iff_ctype",
+            ),
+        ]
+
+    def resolve(self, prev_task):
+        if not self.dynamic:
+            return self.value
+        if prev_task is None:
+            raise ValueError("Dynamic workflow arg used in task 0; no previous task exists.")
+        matches = [
+            cr
+            for cr in prev_task.created_resources.all()
+            if cr.content_type_id == self.content_type_id
+        ]
+        if len(matches) != 1:
+            ct = self.content_type
+            raise ValueError(
+                f"Expected exactly one {ct.app_label}.{ct.model} created resource on previous "
+                f"task (task {prev_task.pk}), found {len(matches)}."
+            )
+        return str(matches[0].object_id)
+
+
+class WorkflowTaskArg(_WorkflowTaskArgBase):
+    """A positional arg of a ``WorkflowTask``."""
+
+    workflow_task = models.ForeignKey(
+        WorkflowTask, related_name="task_args", on_delete=models.CASCADE
+    )
+    arg_index = models.PositiveIntegerField()
+
+    class Meta(_WorkflowTaskArgBase.Meta):
+        unique_together = ("workflow_task", "arg_index")
+        ordering = ("arg_index",)
+
+
+class WorkflowTaskKwarg(_WorkflowTaskArgBase):
+    """A keyword arg of a ``WorkflowTask``."""
+
+    workflow_task = models.ForeignKey(
+        WorkflowTask, related_name="task_kwargs", on_delete=models.CASCADE
+    )
+    kwarg_key = models.TextField()
+
+    class Meta(_WorkflowTaskArgBase.Meta):
+        unique_together = ("workflow_task", "kwarg_key")

@@ -11,62 +11,10 @@ from pulp_workflow.app.models import Workflow, WorkflowTask
 
 _log = logging.getLogger(__name__)
 
-# Marker key used in a task's ``task_args`` / ``task_kwargs`` to reference a
-# resource created by the previous task. The marker's value is a Django
-# ``app_label.model`` string (e.g. ``"core.repositoryversion"``).
-PREV_RESOURCE_MARKER = "$prev_resource"
-
 
 def _workflow_resource(workflow_pk):
     """Resource string used to chain workflow steps via shared/exclusive locks."""
     return f"pulp_workflow:workflow:{workflow_pk}"
-
-
-def _resolve_prev_resource(model_key, prev_task):
-    """Return the pk of the unique CreatedResource of type ``model_key``."""
-    if prev_task is None:
-        raise ValueError(
-            f"{PREV_RESOURCE_MARKER!r} marker used in task 0; no previous task exists."
-        )
-    try:
-        app_label, model = model_key.split(".")
-    except (ValueError, AttributeError):
-        raise ValueError(
-            f"{PREV_RESOURCE_MARKER!r} value must be 'app_label.model', got {model_key!r}."
-        )
-    matches = [
-        cr
-        for cr in prev_task.created_resources.all().select_related("content_type")
-        if cr.content_type.app_label == app_label and cr.content_type.model == model
-    ]
-    if len(matches) != 1:
-        raise ValueError(
-            f"Expected exactly one {model_key!r} created resource on previous task "
-            f"(task {prev_task.pk}), found {len(matches)}."
-        )
-    return str(matches[0].object_id)
-
-
-def _resolve_value(value, prev_task):
-    """Walk ``value`` and replace any ``$prev_resource`` markers in place.
-
-    A marker is a dict ``{"$prev_resource": "<app_label>.<model>"}``; it is
-    replaced with the pk (as a string) of the unique ``CreatedResource`` of
-    that type produced by ``prev_task``. Lists and dicts are walked recursively;
-    all other values pass through unchanged.
-    """
-    if isinstance(value, dict) and PREV_RESOURCE_MARKER in value:
-        if len(value) != 1:
-            raise ValueError(
-                f"A {PREV_RESOURCE_MARKER!r} marker dict must have exactly one key; "
-                f"got {sorted(value)}."
-            )
-        return _resolve_prev_resource(value[PREV_RESOURCE_MARKER], prev_task)
-    if isinstance(value, list):
-        return [_resolve_value(item, prev_task) for item in value]
-    if isinstance(value, dict):
-        return {k: _resolve_value(v, prev_task) for k, v in value.items()}
-    return value
 
 
 def execute_workflow(workflow_pk, next_index=0):
@@ -132,8 +80,7 @@ def execute_workflow(workflow_pk, next_index=0):
     # ourselves (EXCLUSIVE on the workflow) that will run after the child ends.
     resource = _workflow_resource(workflow_pk)
     try:
-        resolved_args = _resolve_value(wf_task.task_args, prev_task)
-        resolved_kwargs = _resolve_value(wf_task.task_kwargs, prev_task)
+        resolved_args, resolved_kwargs = wf_task.materialize(prev_task)
         child = dispatch(
             wf_task.task_name,
             args=resolved_args,
