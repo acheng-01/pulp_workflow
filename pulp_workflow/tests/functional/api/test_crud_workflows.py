@@ -131,7 +131,7 @@ def test_cancel_workflow(workflow_bindings, workflow_factory):
     workflow = workflow_factory(start_time=start_time)
     assert workflow.state == "waiting"
 
-    canceled = workflow_bindings.WorkflowsApi.partial_update(
+    canceled = workflow_bindings.WorkflowsApi.workflows_cancel(
         workflow.pulp_href, {"state": "canceled"}
     )
     assert canceled.state == "canceled"
@@ -151,7 +151,7 @@ def test_cancel_workflow_invalid_state_value(workflow_bindings, workflow_factory
     workflow = workflow_factory(start_time=start_time)
 
     with pytest.raises(workflow_bindings.ApiException) as exc:
-        workflow_bindings.WorkflowsApi.partial_update(workflow.pulp_href, {"state": "completed"})
+        workflow_bindings.WorkflowsApi.workflows_cancel(workflow.pulp_href, {"state": "completed"})
     assert exc.value.status == 400
 
 
