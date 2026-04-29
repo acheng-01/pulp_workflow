@@ -98,9 +98,10 @@ def test_execute_workflow_add_content_and_publish(
     assert task1_task.name == "pulp_file.app.tasks.publish"
     assert repo.pulp_href in (task1_task.reserved_resources_record or [])
 
-    # Both tasks share the same parent task (the running execute_workflow).
+    # Each step is dispatched by its own execute_workflow continuation, so each
+    # child has a parent_task but they are not necessarily the same one.
     assert task0_task.parent_task is not None
-    assert task0_task.parent_task == task1_task.parent_task
+    assert task1_task.parent_task is not None
 
     # Task 0 produced version 1.
     task0_versions = [h for h in (task0_task.created_resources or []) if "/versions/" in h]

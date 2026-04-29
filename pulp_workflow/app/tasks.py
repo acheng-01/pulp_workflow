@@ -1,24 +1,25 @@
 import logging
-import time
 import traceback
 
 from django.db import transaction
 from django.utils import timezone
 
-from pulpcore.constants import TASK_FINAL_STATES, TASK_STATES
+from pulpcore.constants import TASK_STATES
 from pulpcore.plugin.tasking import dispatch
 
-from pulp_workflow.app.models import Workflow
+from pulp_workflow.app.models import Workflow, WorkflowTask
 
 _log = logging.getLogger(__name__)
-
-# How often to re-check a child task's state while waiting.
-_CHILD_POLL_INTERVAL_SECONDS = 1.0
 
 # Marker key used in a task's ``task_args`` / ``task_kwargs`` to reference a
 # resource created by the previous task. The marker's value is a Django
 # ``app_label.model`` string (e.g. ``"core.repositoryversion"``).
 PREV_RESOURCE_MARKER = "$prev_resource"
+
+
+def _workflow_resource(workflow_pk):
+    """Resource string used to chain workflow steps via shared/exclusive locks."""
+    return f"pulp_workflow:workflow:{workflow_pk}"
 
 
 def _resolve_prev_resource(model_key, prev_task):
@@ -68,80 +69,91 @@ def _resolve_value(value, prev_task):
     return value
 
 
-def execute_workflow(workflow_pk):
+def execute_workflow(workflow_pk, next_index=0):
     """
-    Execute the tasks of a Workflow in order, dispatching each as a child task.
+    Run one step of a Workflow, then re-dispatch ourselves for the next step.
 
-    This task is dispatched by a pulpcore ``TaskSchedule`` that is created when a
-    ``Workflow`` is submitted via the API. For each task we call
-    ``pulpcore.plugin.tasking.dispatch`` to create a real pulpcore Task (which gets
-    ``parent_task`` set to the running ``execute_workflow`` task automatically),
-    record it on the WorkflowTask via ``dispatched_task``, and wait for it to reach
-    a final state before moving on. If a child task ends in any non-COMPLETED final
-    state the workflow transitions to FAILED and remaining tasks are not dispatched.
+    Each invocation:
+      1. If this is the first step, transitions the workflow to RUNNING (or
+         exits if it was canceled before starting). Otherwise, checks the
+         previous step's child task and fails the workflow if it did not
+         COMPLETE.
+      2. If there are no more tasks, marks the workflow COMPLETED and returns.
+      3. Otherwise dispatches the next child task with a SHARED lock on the
+         workflow's resource string, and dispatches a continuation of this
+         function (``next_index + 1``) with an EXCLUSIVE lock on the same
+         resource.
 
-    Args:
-        workflow_pk (str): The primary key of the Workflow to execute.
+    Because pulpcore's tasking system will not grant the exclusive lock while
+    the shared lock is held, the continuation cannot start until the child has
+    finished. This avoids blocking a worker on a polling loop while the child
+    runs, which would deadlock once concurrent workflows >= worker count.
     """
-    with transaction.atomic():
-        workflow = Workflow.objects.select_for_update().get(pk=workflow_pk)
-        if workflow.state == TASK_STATES.CANCELED:
-            _log.info(
-                "Workflow %s was canceled before starting; skipping execution.",
-                workflow.name,
-            )
-            return
-        workflow.state = TASK_STATES.RUNNING
-        workflow.started_at = timezone.now()
-        workflow.save(update_fields=["state", "started_at", "pulp_last_updated"])
+    workflow = Workflow.objects.get(pk=workflow_pk)
 
-    prev_task = None
-    for wf_task in workflow.tasks.all():
-        workflow.current_task = wf_task
-        workflow.save(update_fields=["current_task", "pulp_last_updated"])
-
-        try:
-            resolved_args = _resolve_value(wf_task.task_args, prev_task)
-            resolved_kwargs = _resolve_value(wf_task.task_kwargs, prev_task)
-            child = dispatch(
-                wf_task.task_name,
-                args=resolved_args,
-                kwargs=resolved_kwargs,
-                exclusive_resources=wf_task.reserved_resources or None,
-            )
-        except Exception as exc:
-            _log.exception("Workflow %s failed dispatching task %s", workflow.name, wf_task.index)
-            _fail_workflow(workflow, wf_task, exc=exc)
-            return
-
-        wf_task.dispatched_task = child
-        wf_task.save(update_fields=["dispatched_task", "pulp_last_updated"])
-
-        final_state = _wait_for_task(child)
-        if final_state != TASK_STATES.COMPLETED:
-            child.refresh_from_db()
+    if next_index == 0:
+        # First step: honor a pre-start cancel and transition to RUNNING.
+        with transaction.atomic():
+            workflow = Workflow.objects.select_for_update().get(pk=workflow_pk)
+            if workflow.state == TASK_STATES.CANCELED:
+                _log.info("Workflow %s was canceled before starting.", workflow.name)
+                return
+            workflow.state = TASK_STATES.RUNNING
+            workflow.started_at = timezone.now()
+            workflow.save(update_fields=["state", "started_at", "pulp_last_updated"])
+        prev_task = None
+    else:
+        # Continuation: inspect the previous step's child task.
+        prev_wf_task = workflow.tasks.get(index=next_index - 1)
+        prev_task = prev_wf_task.dispatched_task
+        if prev_task.state != TASK_STATES.COMPLETED:
             _fail_workflow(
                 workflow,
-                wf_task,
-                description=f"Task ended in state {final_state!r}.",
-                child_error=child.error,
+                prev_wf_task,
+                description=f"Task ended in state {prev_task.state!r}.",
+                child_error=prev_task.error,
             )
             return
-        prev_task = child
 
-    workflow.current_task = None
-    workflow.state = TASK_STATES.COMPLETED
-    workflow.finished_at = timezone.now()
-    workflow.save(update_fields=["state", "finished_at", "current_task", "pulp_last_updated"])
+    # If there is no task at next_index, the workflow is done.
+    try:
+        wf_task = workflow.tasks.get(index=next_index)
+    except WorkflowTask.DoesNotExist:
+        workflow.current_task = None
+        workflow.state = TASK_STATES.COMPLETED
+        workflow.finished_at = timezone.now()
+        workflow.save(update_fields=["state", "finished_at", "current_task", "pulp_last_updated"])
+        return
 
+    workflow.current_task = wf_task
+    workflow.save(update_fields=["current_task", "pulp_last_updated"])
 
-def _wait_for_task(task):
-    """Block until ``task`` reaches a final state and return that state."""
-    while True:
-        task.refresh_from_db()
-        if task.state in TASK_FINAL_STATES:
-            return task.state
-        time.sleep(_CHILD_POLL_INTERVAL_SECONDS)
+    # Dispatch the child task (SHARED on the workflow), then a continuation of
+    # ourselves (EXCLUSIVE on the workflow) that will run after the child ends.
+    resource = _workflow_resource(workflow_pk)
+    try:
+        resolved_args = _resolve_value(wf_task.task_args, prev_task)
+        resolved_kwargs = _resolve_value(wf_task.task_kwargs, prev_task)
+        child = dispatch(
+            wf_task.task_name,
+            args=resolved_args,
+            kwargs=resolved_kwargs,
+            exclusive_resources=wf_task.reserved_resources or None,
+            shared_resources=[resource],
+        )
+    except Exception as exc:
+        _log.exception("Workflow %s failed dispatching task %s", workflow.name, wf_task.index)
+        _fail_workflow(workflow, wf_task, exc=exc)
+        return
+
+    wf_task.dispatched_task = child
+    wf_task.save(update_fields=["dispatched_task", "pulp_last_updated"])
+
+    dispatch(
+        execute_workflow,
+        kwargs={"workflow_pk": str(workflow_pk), "next_index": next_index + 1},
+        exclusive_resources=[resource],
+    )
 
 
 def _fail_workflow(workflow, wf_task, exc=None, description=None, child_error=None):
