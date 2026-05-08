@@ -1,4 +1,4 @@
-from django.contrib.postgres.fields import ArrayField
+from django.contrib.postgres.fields import ArrayField, HStoreField
 from django.db import models
 from django.db.models import CheckConstraint, Q
 from django.utils import timezone
@@ -17,6 +17,7 @@ class Workflow(BaseModel):
 
     Fields:
         name (models.TextField): Unique name of the workflow.
+        pulp_labels (HStoreField): Dictionary of string values.
         state (models.TextField): Current state of the workflow, drawn from
             ``pulpcore.constants.TASK_STATES``.
         start_time (models.DateTimeField): When the workflow should start executing.
@@ -32,6 +33,7 @@ class Workflow(BaseModel):
     """
 
     name = models.TextField(unique=True)
+    pulp_labels = HStoreField(default=dict)
     state = models.TextField(choices=TASK_CHOICES, default=TASK_STATES.WAITING)
     start_time = models.DateTimeField(default=timezone.now)
     started_at = models.DateTimeField(null=True)

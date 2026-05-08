@@ -6,10 +6,27 @@ from rest_framework.response import Response
 
 from pulpcore.plugin.constants import TASK_STATES
 from pulpcore.plugin.models import TaskSchedule
-from pulpcore.plugin.viewsets import NamedModelViewSet, RolesMixin
+from pulpcore.plugin.viewsets import (
+    BaseFilterSet,
+    LabelFilter,
+    LabelsMixin,
+    NamedModelViewSet,
+    RolesMixin,
+)
 
 from pulp_workflow.app.models import Workflow
 from pulp_workflow.app.serializers import WorkflowCancelSerializer, WorkflowSerializer
+
+
+class WorkflowFilter(BaseFilterSet):
+    pulp_label_select = LabelFilter()
+
+    class Meta:
+        model = Workflow
+        fields = {
+            "name": ["exact", "contains"],
+            "state": ["exact", "in"],
+        }
 
 
 class WorkflowViewSet(
@@ -17,6 +34,7 @@ class WorkflowViewSet(
     mixins.CreateModelMixin,
     mixins.RetrieveModelMixin,
     mixins.ListModelMixin,
+    LabelsMixin,
     RolesMixin,
 ):
     """
@@ -30,10 +48,7 @@ class WorkflowViewSet(
     endpoint_name = "workflows"
     serializer_class = WorkflowSerializer
     ordering = "-pulp_created"
-    filterset_fields = {
-        "name": ["exact", "contains"],
-        "state": ["exact", "in"],
-    }
+    filterset_class = WorkflowFilter
     queryset_filtering_required_permission = "workflow.view_workflow"
 
     DEFAULT_ACCESS_POLICY = {
@@ -49,6 +64,8 @@ class WorkflowViewSet(
                     "create",
                     "update",
                     "partial_update",
+                    "set_label",
+                    "unset_label",
                     "list_roles",
                     "add_role",
                     "remove_role",

@@ -161,6 +161,44 @@ def test_workflow_update_not_supported(workflow_bindings):
 
 
 @pytest.mark.parallel
+def test_create_workflow_with_pulp_labels(workflow_bindings, workflow_factory):
+    """A Workflow can be created with pulp_labels."""
+    workflow = workflow_factory(pulp_labels={"env": "prod", "owner": "qe"})
+    assert workflow.pulp_labels == {"env": "prod", "owner": "qe"}
+
+    fetched = workflow_bindings.WorkflowsApi.read(workflow.pulp_href)
+    assert fetched.pulp_labels == {"env": "prod", "owner": "qe"}
+
+
+@pytest.mark.parallel
+def test_workflow_set_unset_label(workflow_bindings, workflow_factory):
+    """Labels on a Workflow can be set and unset via set_label/unset_label."""
+    workflow = workflow_factory()
+    assert workflow.pulp_labels == {}
+
+    workflow_bindings.WorkflowsApi.set_label(workflow.pulp_href, {"key": "a", "value": "1"})
+    workflow_bindings.WorkflowsApi.set_label(workflow.pulp_href, {"key": "b", "value": None})
+    fetched = workflow_bindings.WorkflowsApi.read(workflow.pulp_href)
+    assert fetched.pulp_labels == {"a": "1", "b": None}
+
+    workflow_bindings.WorkflowsApi.unset_label(workflow.pulp_href, {"key": "a"})
+    fetched = workflow_bindings.WorkflowsApi.read(workflow.pulp_href)
+    assert fetched.pulp_labels == {"b": None}
+
+
+@pytest.mark.parallel
+def test_workflow_filter_by_pulp_label_select(workflow_bindings, workflow_factory):
+    """Workflows can be filtered with pulp_label_select."""
+    marker = str(uuid.uuid4())
+    workflow_factory(pulp_labels={"marker": marker})
+    workflow_factory()  # control: no marker label
+
+    results = workflow_bindings.WorkflowsApi.list(pulp_label_select=f"marker={marker}")
+    assert results.count == 1
+    assert results.results[0].pulp_labels == {"marker": marker}
+
+
+@pytest.mark.parallel
 def test_task_args_and_kwargs_not_exposed(workflow_bindings, workflow_factory):
     """Arg ``value`` fields are write-only and never returned in responses."""
     # Schedule far in the future so the dummy args never actually dispatch.

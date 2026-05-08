@@ -6,7 +6,12 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
 from pulpcore.plugin.models import TaskSchedule
-from pulpcore.plugin.serializers import IdentityField, ModelSerializer, RelatedField
+from pulpcore.plugin.serializers import (
+    IdentityField,
+    ModelSerializer,
+    RelatedField,
+    pulp_labels_validator,
+)
 
 from pulp_workflow.app.models import (
     Workflow,
@@ -177,6 +182,11 @@ class WorkflowSerializer(ModelSerializer):
         allow_blank=False,
         validators=[UniqueValidator(queryset=Workflow.objects.all())],
     )
+    pulp_labels = serializers.HStoreField(
+        help_text=_("A dictionary of arbitrary labels to associate with the workflow."),
+        required=False,
+        validators=[pulp_labels_validator],
+    )
     state = serializers.CharField(
         help_text=_(
             "The current state of the workflow. The possible values include:"
@@ -218,6 +228,7 @@ class WorkflowSerializer(ModelSerializer):
         model = Workflow
         fields = ModelSerializer.Meta.fields + (
             "name",
+            "pulp_labels",
             "state",
             "start_time",
             "started_at",
