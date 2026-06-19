@@ -7,6 +7,7 @@ The workflow has two tasks:
        the unique ``RepositoryVersion`` created by task 0.
 """
 
+import json
 import time
 import uuid
 
@@ -233,3 +234,116 @@ def test_cancel_terminal_workflow_returns_409(workflow_bindings, workflow_factor
     with pytest.raises(workflow_bindings.ApiException) as exc:
         workflow_bindings.WorkflowsApi.workflows_cancel(workflow.pulp_href, {"state": "canceled"})
     assert exc.value.status == 409
+
+
+# Keys ``_fail_workflow`` is permitted to write into ``workflow.error``.
+_ALLOWED_ERROR_KEYS = {
+    "task_index",
+    "task_name",
+    "description",
+    "traceback",
+    "child_error",
+}
+
+
+# A test-only task that raises a ``PulpException`` subclass on every call.
+# Using a ``PulpException`` subclass (rather than e.g. ``TypeError`` from bad
+# kwargs) avoids the ``pulpcore.deprecation`` warning that pulpcore logs for
+# any non-``PulpException`` escaping a task; the CI ``deprecations`` job fails
+# if any such warning is emitted.
+_FAILING_TASK = "pulp_workflow.tests.functional.api._failing_tasks.fail_with_validation_error"
+
+
+def test_failed_workflow_records_child_error_when_child_task_fails(
+    workflow_bindings, pulpcore_bindings, workflow_factory
+):
+    """A child task that fails surfaces a well-formed error payload."""
+    workflow = workflow_factory(
+        tasks=[
+            {
+                "task_name": _FAILING_TASK,
+                "task_kwargs": [
+                    {"kwarg_key": "audit_marker", "value": "trigger-failure"},
+                ],
+            },
+        ],
+    )
+
+    finished = _wait_for_workflow(workflow_bindings.WorkflowsApi, workflow.pulp_href)
+    assert finished.state == "failed"
+    assert finished.finished_at is not None
+
+    error = finished.error
+    assert isinstance(error, dict)
+    assert set(error).issubset(_ALLOWED_ERROR_KEYS)
+    assert error["task_index"] == 0
+    assert error["task_name"] == _FAILING_TASK
+    assert isinstance(error["description"], str) and error["description"]
+    # No "traceback" key for the child-failure path: it is only set when
+    # "_fail_workflow" is called with "exc=" (the dispatch-time path).
+    assert "traceback" not in error
+
+    child_task_href = finished.tasks[0].dispatched_task
+    assert child_task_href is not None
+    child_task = pulpcore_bindings.TasksApi.read(child_task_href)
+    assert child_task.state == "failed"
+    assert error["child_error"] == child_task.error
+
+
+def test_failed_workflow_error_does_not_leak_task_arg_values(workflow_bindings, workflow_factory):
+    sentinel = f"audit-sentinel-{uuid.uuid4()}"
+    workflow = workflow_factory(
+        tasks=[
+            {
+                "task_name": _FAILING_TASK,
+                "task_kwargs": [
+                    {"kwarg_key": "audit_marker", "value": sentinel},
+                ],
+            },
+        ],
+    )
+
+    finished = _wait_for_workflow(workflow_bindings.WorkflowsApi, workflow.pulp_href)
+    assert finished.state == "failed"
+    serialized = json.dumps(finished.error, default=str)
+    assert sentinel not in serialized, f"workflow.error leaked task arg value: {serialized!r}"
+
+
+def test_failed_workflow_dispatch_traceback_does_not_leak_task_arg_values(
+    workflow_bindings, workflow_factory
+):
+    """Dispatch-time failure (unresolvable dynamic kwarg) sets ``traceback`` without leaking args."""
+    sentinel = f"audit-sentinel-{uuid.uuid4()}"
+    workflow = workflow_factory(
+        tasks=[
+            {
+                "task_name": "pulpcore.app.tasks.orphan_cleanup",
+                "task_kwargs": [{"kwarg_key": "orphan_protection_time", "value": 525600}],
+            },
+            {
+                "task_name": "pulpcore.app.tasks.orphan_cleanup",
+                "task_kwargs": [
+                    {
+                        "kwarg_key": sentinel,
+                        "content_type": "core.repositoryversion",
+                    },
+                ],
+            },
+        ],
+    )
+
+    finished = _wait_for_workflow(workflow_bindings.WorkflowsApi, workflow.pulp_href)
+    assert finished.state == "failed"
+
+    error = finished.error
+    assert isinstance(error, dict)
+    assert set(error).issubset(_ALLOWED_ERROR_KEYS)
+    assert error["task_index"] == 1
+    assert "traceback" in error and isinstance(error["traceback"], str)
+    # Dispatch-time path does not have a child task to pull error info from.
+    assert "child_error" not in error
+
+    serialized = json.dumps(error, default=str)
+    assert sentinel not in serialized, (
+        f"workflow.error leaked dynamic kwarg key into traceback: {serialized!r}"
+    )
